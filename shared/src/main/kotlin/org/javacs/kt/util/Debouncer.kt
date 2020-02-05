@@ -3,6 +3,7 @@ package org.javacs.kt.util
 import org.javacs.kt.LOG
 import java.time.Duration
 import java.util.function.Supplier
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -20,20 +21,26 @@ class Debouncer(
     private val delayMs = delay.toMillis()
     private var pendingTask: Future<*>? = null
 
-    fun submitImmediately(task: () -> Unit) {
+    fun submitImmediately(task: (cancelCallback: () -> Boolean) -> Unit) {
         pendingTask?.cancel(false)
-        pendingTask = executor.submit(task)
+        val currentTaskRef = AtomicReference<Future<*>>()
+        val currentTask = executor.submit { task { currentTaskRef.get()?.isCancelled() ?: false } }
+        currentTaskRef.set(currentTask)
+        pendingTask = currentTask
     }
 
-    fun submit(task: () -> Unit) {
+    fun schedule(task: (cancelCallback: () -> Boolean) -> Unit) {
         pendingTask?.cancel(false)
-        pendingTask = executor.schedule(task, delayMs, TimeUnit.MILLISECONDS)
+        val currentTaskRef = AtomicReference<Future<*>>()
+        val currentTask = executor.schedule({ task { currentTaskRef.get()?.isCancelled() ?: false } }, delayMs, TimeUnit.MILLISECONDS)
+        currentTaskRef.set(currentTask)
+        pendingTask = currentTask
     }
 
     fun waitForPendingTask() {
         pendingTask?.get()
     }
-    
+
     fun shutdown(awaitTermination: Boolean) {
         executor.shutdown()
         if (awaitTermination) {

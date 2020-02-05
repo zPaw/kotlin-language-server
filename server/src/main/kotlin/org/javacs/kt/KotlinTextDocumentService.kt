@@ -42,15 +42,14 @@ class KotlinTextDocumentService(
 ) : TextDocumentService, Closeable {
     private lateinit var client: LanguageClient
     private val async = AsyncExecutor()
-    private var linting = false
 
     var debounceLint = Debouncer(Duration.ofMillis(config.linting.debounceTime))
     val lintTodo = mutableSetOf<URI>()
     var lintCount = 0
 
-    fun connect(client: LanguageClient) {
-        this.client = client
-    }
+    var lintRecompilationCallback: () -> Unit
+        get() = sp.beforeCompileCallback
+        set(callback) { sp.beforeCompileCallback = callback }
 
     private val TextDocumentItem.filePath: Path?
         get() = parseURI(uri).filePath
@@ -64,8 +63,12 @@ class KotlinTextDocumentService(
     private val TextDocumentIdentifier.content: String
         get() = uriContentProvider.contentOf(parseURI(uri))
 
+    fun connect(client: LanguageClient) {
+        this.client = client
+    }
+
     private enum class Recompile {
-        ALWAYS, AFTER_DOT, WAIT_FOR_LINT, NEVER
+        ALWAYS, AFTER_DOT, NEVER
     }
 
     private fun recover(position: TextDocumentPositionParams, recompile: Recompile): Pair<CompiledFile, Int> {
@@ -75,10 +78,6 @@ class KotlinTextDocumentService(
         val shouldRecompile = when (recompile) {
             Recompile.ALWAYS -> true
             Recompile.AFTER_DOT -> offset > 0 && content[offset - 1] == '.'
-            Recompile.WAIT_FOR_LINT -> {
-                debounceLint.waitForPendingTask()
-                false
-            }
             Recompile.NEVER -> false
         }
         val compiled = if (shouldRecompile) sp.currentVersion(uri) else sp.latestCompiledVersion(uri)
@@ -254,9 +253,7 @@ class KotlinTextDocumentService(
 
     private fun lintLater(uri: URI) {
         lintTodo.add(uri)
-        if (!linting) {
-            debounceLint.submit(::doLint)
-        }
+        debounceLint.schedule(::doLint)
     }
 
     private fun lintNow(file: URI) {
@@ -264,17 +261,14 @@ class KotlinTextDocumentService(
         debounceLint.submitImmediately(::doLint)
     }
 
-    private fun doLint() {
-        linting = true
-        try {
-            LOG.info("Linting {}", describeURIs(lintTodo))
-            val files = clearLint()
-            val context = sp.compileFiles(files)
+    private fun doLint(cancelCallback: () -> Boolean) {
+        LOG.info("Linting {}", describeURIs(lintTodo))
+        val files = clearLint()
+        val context = sp.compileFiles(files)
+        if (!cancelCallback.invoke()) {
             reportDiagnostics(files, context.diagnostics)
-            lintCount++
-        } finally {
-            linting = false
         }
+        lintCount++
     }
 
     private fun reportDiagnostics(compiled: Collection<URI>, kotlinDiagnostics: Diagnostics) {
